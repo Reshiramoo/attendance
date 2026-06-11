@@ -43,6 +43,13 @@ const calculateIntervals = (entries: AttendanceEntry[]) => {
 const calculateHours = (entries: AttendanceEntry[]) => calculateIntervals(entries)
   .reduce((sum, interval) => sum + interval.hours, 0);
 
+const formatHours = (hours: number) => {
+  if (hours >= 1) return `${hours.toFixed(2)}h`;
+  if (hours >= 1 / 60) return `${Math.round(hours * 60)}m`;
+  if (hours > 0) return `${Math.round(hours * 3600)}s`;
+  return '0h';
+};
+
 const startOfDay = (date: Date) => {
   const result = new Date(date);
   result.setHours(0, 0, 0, 0);
@@ -132,11 +139,20 @@ function App() {
     const saved = window.localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        setEntries(JSON.parse(saved));
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setEntries(parsed.map((entry) => ({
+            id: entry.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            type: entry.type,
+            timestamp: entry.timestamp,
+          })));
+          return;
+        }
       } catch {
-        setEntries([]);
+        // fall through
       }
     }
+    setEntries([]);
   }, []);
 
   useEffect(() => {
@@ -145,6 +161,16 @@ function App() {
 
   const lastEntry = entries[entries.length - 1];
   const nextAction = lastEntry?.type === 'in' ? 'out' : 'in';
+  const isWorking = lastEntry?.type === 'in';
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   const addEntry = (type: 'in' | 'out') => {
     const now = new Date().toISOString();
@@ -199,6 +225,15 @@ function App() {
     : 0;
   const graphDailyMax = Math.max(...daySeries.map((point) => point.hours), 1);
   const graphWeeklyMax = Math.max(...weekSeries.map((point) => point.hours), 1);
+  const activeShiftDuration = useMemo(() => {
+    if (lastEntry?.type !== 'in') return '';
+    const elapsed = Math.max(0, currentTime.getTime() - new Date(lastEntry.timestamp).getTime());
+    const totalSeconds = Math.floor(elapsed / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }, [currentTime, lastEntry]);
 
   return (
     <div className="page-shell">
@@ -212,10 +247,13 @@ function App() {
 
       <main>
         <section className="control-panel card">
+          <div className="shift-timer">
+            {activeShiftDuration ? `Current shift: ${activeShiftDuration}` : 'Not working now'}
+          </div>
           <button className="primary-btn" onClick={() => addEntry(nextAction)}>
             {nextAction === 'in' ? 'Clock In' : 'Clock Out'}
           </button>
-          <div className="status-pill">
+          <div className={`status-pill ${isWorking ? 'active' : ''}`}>
             {lastEntry ? `Last event: ${lastEntry.type.toUpperCase()} at ${formatTime(lastEntry.timestamp)}` : 'No entries yet'}
           </div>
           <div className="filter-group">
@@ -244,23 +282,23 @@ function App() {
         <section className="stats-grid card">
           <div>
             <h2>Total hours</h2>
-            <p>{totalHours.toFixed(2)}h</p>
+            <p>{formatHours(totalHours)}</p>
           </div>
           <div>
             <h2>Avg hours / week</h2>
-            <p>{avgWeeklyHours.toFixed(2)}h</p>
+            <p>{formatHours(avgWeeklyHours)}</p>
           </div>
           <div>
             <h2>This month</h2>
-            <p>{monthHours.toFixed(2)}h</p>
+            <p>{formatHours(monthHours)}</p>
           </div>
           <div>
             <h2>Today</h2>
-            <p>{todayHours.toFixed(2)}h</p>
+            <p>{formatHours(todayHours)}</p>
           </div>
           <div>
             <h2>Visible hours</h2>
-            <p>{filteredHours.toFixed(2)}h</p>
+            <p>{formatHours(filteredHours)}</p>
           </div>
           <div>
             <h2>Tracked weeks</h2>
@@ -279,11 +317,14 @@ function App() {
             </div>
             <div className="bar-chart">
               {daySeries.map((point) => (
-                <div className="bar-item" key={point.label}>
+                <div className="bar-item" key={point.label} data-tooltip={`${point.label}: ${formatHours(point.hours)}`}>
                   <div
                     className="bar"
-                    style={{ height: `${(point.hours / graphDailyMax) * 100}%` }}
-                    title={`${point.hours.toFixed(2)}h`}
+                    style={{
+                      height: point.hours > 0
+                        ? `max(8px, ${(point.hours / graphDailyMax) * 100}%)`
+                        : '4px',
+                    }}
                   />
                   <span className="bar-label">{point.label}</span>
                 </div>
@@ -301,11 +342,14 @@ function App() {
             </div>
             <div className="bar-chart">
               {weekSeries.map((point) => (
-                <div className="bar-item" key={point.label}>
+                <div className="bar-item" key={point.label} data-tooltip={`${point.label}: ${formatHours(point.hours)}`}>
                   <div
                     className="bar"
-                    style={{ height: `${(point.hours / graphWeeklyMax) * 100}%` }}
-                    title={`${point.hours.toFixed(2)}h`}
+                    style={{
+                      height: point.hours > 0
+                        ? `max(8px, ${(point.hours / graphWeeklyMax) * 100}%)`
+                        : '4px',
+                    }}
                   />
                   <span className="bar-label">{point.label}</span>
                 </div>
@@ -327,25 +371,27 @@ function App() {
           ) : filteredEntries.length === 0 ? (
             <p className="empty-state">No entries match this view. Try another filter or add more records.</p>
           ) : (
-            <div className="entry-list">
-              {filteredEntries.slice().reverse().map((entry) => (
-                <div key={entry.id} className="entry-row">
-                  <div>
-                    <strong>{entry.type === 'in' ? 'In' : 'Out'}</strong>
-                    <div>{formatTime(entry.timestamp)}</div>
+            <div className="entry-list-wrapper">
+              <div className="entry-list">
+                {filteredEntries.slice().reverse().map((entry) => (
+                  <div key={entry.id} className={`entry-row ${entry.type}`}>
+                    <div>
+                      <strong className="type-pill">{entry.type === 'in' ? 'In' : 'Out'}</strong>
+                      <div>{formatTime(entry.timestamp)}</div>
+                    </div>
+                    <div className="entry-actions">
+                      <div>{formatDate(entry.timestamp)}</div>
+                      <button
+                        className="delete-btn"
+                        onClick={() => deleteEntry(entry.id)}
+                        aria-label={`Delete ${entry.type} entry at ${formatTime(entry.timestamp)}`}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
-                  <div className="entry-actions">
-                    <div>{formatDate(entry.timestamp)}</div>
-                    <button
-                      className="delete-btn"
-                      onClick={() => deleteEntry(entry.id)}
-                      aria-label={`Delete ${entry.type} entry at ${formatTime(entry.timestamp)}`}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           )}
         </section>
